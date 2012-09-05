@@ -48,7 +48,7 @@
         ms))))
 
 (defn- comma-sep [xs]
-  (interpose "," xs))
+  (interpose " " xs))
 
 (defn- escape-char [^Character c]
   (let [cp (.hashCode c)]
@@ -123,60 +123,58 @@
     (emits \/ (.replaceAll (re-matcher #"/" pattern) "\\\\/") \/ flags)))
 
 (defmethod emit-constant clojure.lang.Keyword [x]
-           (emits \" "\\uFDD0" \'
+           (emits ":"
                   (if (namespace x)
                     (str (namespace x) "/") "")
-                  (name x)
-                  \"))
+                  (name x)))
 
 (defmethod emit-constant clojure.lang.Symbol [x]
-           (emits \" "\\uFDD1" \'
+           (emits "'"
                   (if (namespace x)
                     (str (namespace x) "/") "")
-                  (name x)
-                  \"))
+                  (name x)))
 
 (defn- emit-meta-constant [x & body]
   (if (meta x)
     (do
-      (emits "cljs.core.with_meta(" body ",")
+      (emits "(cljs.core/with-meta " body " ")
       (emit-constant (meta x))
       (emits ")"))
     (emits body)))
 
 (defmethod emit-constant clojure.lang.PersistentList$EmptyList [x]
-  (emit-meta-constant x "cljs.core.List.EMPTY"))
+  (emit-meta-constant x "'()"))
 
 (defmethod emit-constant clojure.lang.PersistentList [x]
   (emit-meta-constant x
-    (concat ["cljs.core.list("]
+    (concat ["(cljs.core/list "]
             (comma-sep (map #(fn [] (emit-constant %)) x))
             [")"])))
 
 (defmethod emit-constant clojure.lang.Cons [x]
   (emit-meta-constant x
-    (concat ["cljs.core.list("]
+    (concat ["(cljs.core/list "]
             (comma-sep (map #(fn [] (emit-constant %)) x))
             [")"])))
 
 (defmethod emit-constant clojure.lang.IPersistentVector [x]
   (emit-meta-constant x
-    (concat ["cljs.core.vec(["]
+    (concat ["["]
             (comma-sep (map #(fn [] (emit-constant %)) x))
-            ["])"])))
+            ["]"])))
 
 (defmethod emit-constant clojure.lang.IPersistentMap [x]
   (emit-meta-constant x
-    (concat ["cljs.core.hash_map("]
+    (concat ["{"]
             (comma-sep (map #(fn [] (emit-constant %))
                             (apply concat x)))
-            [")"])))
+            ["}"])))
 
 (defmethod emit-constant clojure.lang.PersistentHashSet [x]
   (emit-meta-constant x
-    (concat ["cljs.core.set(["]
+    (concat ["#{"]
             (comma-sep (map #(fn [] (emit-constant %)) x))
-            ["])"])))
+            ["}"])))
 
 (defn emit-block
   [context statements ret]
@@ -186,9 +184,7 @@
 
 (defmacro emit-wrap [env & body]
   `(let [env# ~env]
-     (when (= :return (:context env#)) (emits "return "))
-     ~@body
-     (when-not (= :expr (:context env#)) (emitln ";"))))
+     ~@body))
 
 (defmethod emit :no-op [m])
 
@@ -225,11 +221,7 @@
              "})")
 
       (<= (count keys) array-map-threshold)
-      (emits "cljs.core.PersistentArrayMap.fromArrays(["
-             (comma-sep keys)
-             "],["
-             (comma-sep vals)
-             "])")
+      (emits "{" (comma-sep (interleave keys vals)) "}")
 
       :else
       (emits "cljs.core.PersistentHashMap.fromArrays(["
@@ -241,10 +233,7 @@
 (defmethod emit :vector
   [{:keys [items env]}]
   (emit-wrap env
-    (if (empty? items)
-      (emits "cljs.core.PersistentVector.EMPTY")
-      (emits "cljs.core.PersistentVector.fromArray(["
-             (comma-sep items) "], true)"))))
+      (emits "[" (comma-sep items) "]")))
 
 (defmethod emit :set
   [{:keys [items env]}]
@@ -314,22 +303,20 @@
     (letfn [(print-comment-lines [e] (doseq [next-line (string/split-lines e)]
                                        (emitln "* " (string/trim next-line))))]
       (when (seq docs)
-        (emitln "/**")
+        (emitln ";;;")
         (doseq [e docs]
           (when e
             (print-comment-lines e)))
-        (emitln "*/")))))
+        (emitln ";;;")))))
 
 (defmethod emit :def
   [{:keys [name init env doc export]}]
   (when init
     (let [mname (munge name)]
       (emit-comment doc (:jsdoc init))
-      (emits mname)
-      (emits " = " init)
-      (when-not (= :expr (:context env)) (emitln ";"))
-      (when export
-        (emitln "goog.exportSymbol('" (munge export) "', " mname ");")))))
+      (emits "(def ")
+      (emits mname " ")
+      (emits init ")"))))
 
 (defn emit-apply-to
   [{:keys [name params env]}]
@@ -361,15 +348,11 @@
 (defn emit-fn-method
   [{:keys [gthis name variadic params statements ret env recurs max-fixed-arity]}]
   (emit-wrap env
-             (emitln "(function " (munge name) "(" (comma-sep (map munge params)) "){")
+             (emitln "(fn " (munge name) " [" (comma-sep (map munge params)) "] ")
              (when gthis
                (emitln "var " gthis " = this;"))
-             (when recurs (emitln "while(true){"))
              (emit-block :return statements ret)
-             (when recurs
-               (emitln "break;")
-               (emitln "}"))
-             (emits "})")))
+             (emits ")")))
 
 (defn emit-variadic-fn-method
   [{:keys [gthis name variadic params statements ret env recurs max-fixed-arity] :as f}]
@@ -522,16 +505,12 @@
 (defmethod emit :let
   [{:keys [bindings statements ret env loop]}]
   (let [context (:context env)]
-    (when (= :expr context) (emits "(function (){"))
+    (when (= :expr context) (emits "(let ["))
     (doseq [{:keys [name init]} bindings]
-      (emitln "var " (munge name) " = " init ";"))
-    (when loop (emitln "while(true){"))
+      (emitln (munge name) "  " init))
+    (when (= :expr context) (emits "]"))
     (emit-block (if (= :expr context) :return context) statements ret)
-    (when loop
-      (emitln "break;")
-      (emitln "}"))
-    ;(emits "}")
-    (when (= :expr context) (emits "})()"))))
+    (when (= :expr context) (emits ")"))))
 
 (defmethod emit :recur
   [{:keys [frame exprs env]}]
@@ -619,21 +598,21 @@
 
        keyword?
        (emits "(new cljs.core.Keyword(" f ")).call(" (comma-sep (cons "null" args)) ")")
-       
+
        variadic-invoke
        (let [mfa (:max-fixed-arity variadic-invoke)]
         (emits f "(" (comma-sep (take mfa args))
                (when-not (zero? mfa) ",")
                "cljs.core.array_seq([" (comma-sep (drop mfa args)) "], 0))"))
-       
+
        (or fn? js? goog?)
-       (emits f "(" (comma-sep args)  ")")
-       
+       (emits "(" f " " (comma-sep args)  ")")
+
        :else
        (if (and ana/*cljs-static-fns* (= (:op f) :var))
          (let [fprop (str ".cljs$lang$arity$" (count args))]
            (emits "(" f fprop " ? " f fprop "(" (comma-sep args) ") : " f ".call(" (comma-sep (cons "null" args)) "))"))
-         (emits f ".call(" (comma-sep (cons "null" args)) ")"))))))
+         (emits "(" f " " (comma-sep args) ")"))))))
 
 (defmethod emit :new
   [{:keys [ctor args env]}]
@@ -665,12 +644,10 @@
     (emitln "/**")
     (emitln "* @constructor")
     (emitln "*/")
-    (emitln (munge t) " = (function (" (comma-sep fields) "){")
-    (doseq [fld fields]
-      (emitln "this." fld " = " fld ";"))
+    (emitln "(deftype " (munge t) " [" (comma-sep fields) "] ")
     (doseq [[pno pmask] pmasks]
       (emitln "this.cljs$lang$protocol_mask$partition" pno "$ = " pmask ";"))
-    (emitln "})")))
+    (emitln ")")))
 
 (defmethod emit :defrecord*
   [{:keys [t fields pmasks]}]
@@ -709,8 +686,8 @@
   [{:keys [target field method args env]}]
   (emit-wrap env
              (if field
-               (emits target "." (munge field #{}))
-               (emits target "." (munge method #{}) "("
+               (emits "(.-" (munge field #{}) " " target ")" )
+               (emits "(." (munge method #{}) " " target
                       (comma-sep args)
                       ")"))))
 
